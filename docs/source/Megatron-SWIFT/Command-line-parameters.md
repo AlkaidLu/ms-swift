@@ -137,7 +137,7 @@ Megatron 训练（`megatron sft/pt/rlhf`）在 Swift 参数入口前置 Megatron
 - 🔥no_load_rng: 不载入rng，默认为False。
 - 🔥finetune: 将模型加载并微调。**不加载检查点的优化器和随机种子状态，并将迭代数设置为0**。默认为True。
   - 注意：**断点续训**你需要设置`--mcore_model`（lora训练需要额外设置`--mcore_adapter`），若设置`--finetune true`，将不加载优化器状态和随机种子状态并将迭代数设置为0，不会进行数据集跳过；若设置`--finetune false`，将读取迭代数并跳过之前训练的数据集数量，优化器状态和随机种子状态的读取通过`--no_load_optim`和`--no_load_rng`控制。
-  - 流式数据集`--streaming`，暂不支持跳过数据集。
+  - 流式数据集`--streaming`在`--finetune false`断点续训时，会从流的开头顺序读取并跳过检查点已经消耗的训练批次，再开始训练；跳过阶段仍会读取并执行数据预处理，因此恢复时间会随跳过量增加。该行为要求数据内容、数据顺序与shuffle seed、tokenizer/预处理与packing配置，以及micro batch、数据并行规模和RL批次设置（如`num_generations`）等batch拓扑与保存检查点时一致；改变这些设置不保证得到相同的数据顺序。验证数据迭代器不会跳过，仍从开头开始。GRPO/GKD的rollout buffer未保存，只有在完整的`steps_per_generation`周期边界恢复；从周期中间恢复会直接报错。该机制只恢复数据流位置，不承诺bitwise RNG或优化器轨迹完全一致。
 - perform_initialization: 对权重进行初始化，默认为False。
 - use_cpu_initialization: 在cpu上初始化权重，默认为False。在进行HF和MCore权重转换时会被使用。通常不需要修改该值。
 - 🔥async_save: 使用异步检查点保存。目前仅适用于`torch_dist`分布式检查点格式。默认为False。

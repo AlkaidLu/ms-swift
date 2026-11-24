@@ -285,11 +285,14 @@ class BaseMegatronTrainer(ABC):
         data_collator = partial(data_collator, padding_to=padding_to)
         return data_collator
 
-    def cyclic_iter(self, iterable, use_origin_cyclic: bool = False):
+    def cyclic_iter(self, iterable, use_origin_cyclic: bool = False, skip_batches: int = 0):
         training = self.unwrapped_models[0].training
         if not training or use_origin_cyclic:
             while True:
                 for x in iterable:
+                    if skip_batches > 0:
+                        skip_batches -= 1
+                        continue
                     yield x
             return
 
@@ -302,6 +305,9 @@ class BaseMegatronTrainer(ABC):
             if hasattr(iterable, 'set_epoch'):
                 iterable.set_epoch(epoch)
             for x in iterable:
+                if skip_batches > 0:
+                    skip_batches -= 1
+                    continue
                 yield x
             # streaming
             if training and args.num_train_epochs and epoch >= args.num_train_epochs - 1:
@@ -608,8 +614,24 @@ class BaseMegatronTrainer(ABC):
             raise ValueError(f'Source path is neither a file nor a directory: {src_path}')
 
     def _prepare_data_iterator(self, train_dataset, val_dataset=None, use_origin_cyclic: bool = False):
+        args = self.args
+        skip_batches = 0
+        if args.streaming and not use_origin_cyclic and self.state.consumed_train_samples > 0:
+            consumed_samples = self.state.consumed_train_samples
+            batch_width = args.micro_batch_size * mpu.get_data_parallel_world_size()
+            if args.rlhf_type in {'grpo', 'gkd'}:
+                if self.state.iteration % args.steps_per_generation:
+                    raise RuntimeError('Cannot resume streaming GRPO/GKD training from the middle of a rollout buffer. '
+                                       'Resume from a checkpoint saved at a steps_per_generation boundary.')
+                batch_width *= args.num_generations
+            skip_batches, remainder = divmod(consumed_samples, batch_width)
+            if remainder:
+                raise RuntimeError(f'consumed_train_samples ({consumed_samples}) must be divisible by '
+                                   f'streaming batch width ({batch_width})')
+            logger.info(f'Skipping {skip_batches} consumed streaming batches per data-parallel rank.')
         train_dataloader, val_dataloader = self._prepare_dataloader(train_dataset, val_dataset)
-        train_data_iterator = iter(self.cyclic_iter(train_dataloader, use_origin_cyclic=use_origin_cyclic))
+        train_data_iterator = iter(
+            self.cyclic_iter(train_dataloader, use_origin_cyclic=use_origin_cyclic, skip_batches=skip_batches))
         val_data_iterator = None
         if val_dataset is not None:
             val_data_iterator = iter(self.cyclic_iter(val_dataloader, use_origin_cyclic=use_origin_cyclic))
